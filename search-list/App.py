@@ -1,22 +1,26 @@
 import requests
 from bs4 import BeautifulSoup
-from pandas import DataFrame
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 
 class App:
-
+    
+    max_worker = 10
     home_url = "https://artisans.quelleenergie.fr/"
 
     def get_cates(self, url):
         ret = []
-        # Send a GET request to the URL
-        response = requests.get(url)
 
-        # Check if the request was successful
+        response = requests.get(url)
         if response.status_code == 200:
             # Parse the HTML content of the page
             soup = BeautifulSoup(response.text, "html.parser")
-            search_domain = soup.find('select', id='search-domaine-activite')
+            search_domain = soup.find(
+                'select',
+                id='search-domaine-activite'
+            )
             options = search_domain.find_all('option')
+
             for option in options:
                 ret.append(option['value'])
         else:
@@ -32,12 +36,10 @@ class App:
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             pagination = soup.find('nav', class_='pagination')
-            # print(pagination)
             if pagination == None:
                 print("None pagination")
             else:
                 pagination.find('span', class_='page')
-                # print(pagination)
                 last = pagination.find('span', class_="last")
                 last_href = last.find('a')
                 if last_href:
@@ -49,7 +51,9 @@ class App:
 
         print("cate page", cate, page)
         if page == 0: 
-            return None
+            return []
+
+        page = 2
 
         return range(1, int(page)+1)
 
@@ -61,13 +65,20 @@ class App:
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             companies = soup.find(
-            'div', class_='artisans-container'
-            ).find_all('a', class_='artisan-item')
+                'div', class_='artisans-container'
+                ).find_all('a',class_='artisan-item')
         
-            for company in companies:
-                href = company['href']
-                # print(href, "\n")
-                ret.append(self.info(cate, href))
+            with ThreadPoolExecutor(max_workers=self.max_worker) as executor:
+                future_rets = {executor.submit(self.info, cate, a['href']): a for a in companies}
+                for future in concurrent.futures.as_completed(future_rets):
+                    try:
+                        # data = future.result()
+                        ret.append(future.result())
+                        # print("cate data: ", cate, data)
+                    except Exception as exc:
+                        print('generated an exception: %s' % (exc))
+                    else:
+                        print('company page %d, cate %s' % (page, cate))
 
         else:
             print("Failed to retrieve page:", response.status_code)
@@ -78,13 +89,13 @@ class App:
         url = self.home_url + href.lstrip('/')
         print("info url : ", url)
         ret = {
-            'Company':'',
+            # 'Company':'',
             'Job_category': cate,
-            'Siret': '',
-            'Address': '',
-            'Postcode': '',
-            'City': '',
-            'Website': '',
+            # 'Siret': '',
+            # 'Address': '',
+            # 'Postcode': '',
+            # 'City': '',
+            # 'Website': '',
         }
         response = requests.get(url)
 
@@ -99,9 +110,7 @@ class App:
                 label = row.find('span', class_='informations-societe-label')
                 value = row.find('span', class_='informations-societe-value')
                 if label != None:
-                    # print(len(label), len(value), value)
-                    # print(label.get_text(), value.get_text())
-                    label_txt = label.text.strip()
+                    label_txt = label.text.replace(':', '').strip()
                     ret[label_txt] = value.text.strip()
         else:
             print("Failed to retrieve page:", response.status_code)
@@ -109,24 +118,35 @@ class App:
         return ret
 
     def save(self, data):
-        df = DataFrame(data)
-        df.to_excel("company.xlsx", index=False)
+        import csv
+        # csv header
+        fieldnames = ['Job_category', 'Company', 'Siret', 'Adresse', 'Site web']
+
+        with open('company.csv', 'w', encoding='UTF8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(data)
+
         return
 
     def run(self):
         print("App start running")
+        companies = []
         for cate in self.get_cates(self.home_url):
-            companies = []
             pages = self.get_page(cate)
-            if pages:
-                for p in pages:
-                    # print(p)
-                    ret = self.company(cate, p)
-                    companies.append(ret)
-                    # print(ret)
+            with ThreadPoolExecutor(max_workers=self.max_worker) as executor:
+                future_rets = {executor.submit(self.company, cate, p): p for p in pages}
+                for future in concurrent.futures.as_completed(future_rets):
+                    try:
+                        data = future.result()
+                        companies = companies + data
+                        print("cate data: ", cate, data)
+                    except Exception as exc:
+                        print('generated an exception: %s' % (exc))
+                    else:
+                        print('%d bytes' % (len(data)))
 
-            if companies:
-                self.save(companies)
-                exit()
+        if companies:
+            self.save(companies)
         return
 
